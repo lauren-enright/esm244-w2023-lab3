@@ -1,0 +1,328 @@
+---
+title: "Lab_3"
+author: "L. Enright"
+date: "2023-01-26"
+output: html_document
+---
+
+```{r setup, echo = TRUE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(tidymodels)
+library(palmerpenguins)
+library(GGally)
+library(jtools)
+library(AICcmodavg)
+```
+
+#Psuedocode 
+
+* Examine our data (plots, tables, summary stats)
+* Identify a question
+* Wrangle the data 
+* Identify some candidate models 
+* Select among candidate models using AIC/BIC
+* Select among candidate models using K- fold cross validation 
+* Select among candidate models using area under Reciever Operating Characteristic Curve 
+
+
+```{r}
+GGally::ggpairs(penguins %>% select(species, bill_length_mm:sex),
+        aes(color = species))
+
+#get a quick look at all of the data 
+```
+
+```{r}
+class(penguins$species)
+levels(penguins$species)
+
+adelie_chinstrap <- penguins %>%
+  filter(species %in% c('Adelie', 'Chinstrap')) %>% #this will still include Gentoo as one of our factors (not good)
+  mutate(species = fct_drop(species)) %>% #this gets rid of Gentoo, it removes unused levels 
+  select(-year) %>%
+  drop_na
+  
+
+
+# use %in% --> means "A OR C" instead of creating an "A, C, A, C" vector, use for ONE or MANY. Use this all of the time to be safe 
+# == means "match" --> makes a vector (aka "A, C, A, C") and you are missing data, only works for ONE item 
+```
+
+#Let's check out the trends across the variables 
+
+```{r}
+ggplot(data = adelie_chinstrap, aes(x = body_mass_g, y = flipper_length_mm)) +
+  geom_point(aes(color = sex, shape = island)) + facet_wrap(~ species)
+
+#above is a good graph... maybe useful for #coral stuffs?
+
+ggplot(data = adelie_chinstrap, aes(x = body_mass_g, y = bill_length_mm)) + 
+  geom_point(aes(color = sex, shape = island)) +
+  facet_wrap(~ species)
+```
+
+# Let's do some binary logistic regression 
+
+```{r}
+f1 <- species ~ body_mass_g + flipper_length_mm + sex
+
+ad_chin_blr1 <- glm(formula = f1, data = adelie_chinstrap,
+                    family = 'binomial')
+
+summary(ad_chin_blr1)
+# reference levels is adelie  
+# heavier penguins might be adelie's 
+# if you increase the body mass, it decreases the chance of being a chinstrap 
+# if you increase the flipper length, it increases the chance of being a chinstrap
+
+brl1_tidy <- tidy(ad_chin_blr1)
+
+brl1_tidy
+```
+
+```{r}
+ggplot(data = adelie_chinstrap, aes(x = species, y = flipper_length_mm)) + 
+  geom_jitter(aes(color = sex))
+
+```
+
+```{r}
+brl1_fitted <- ad_chin_blr1 %>%
+  broom::augment(type.predict = 'response')
+
+# the fitted column means: has a 0.03 chance of being a 0 (Adeliele) VS Chinstrap (1)
+
+ggplot(data = brl1_fitted, aes(x = flipper_length_mm, y = .fitted)) +
+  geom_point(aes(color = sex, shape = species)) +
+  geom_smooth(aes(color = sex), se = FALSE) +
+  labs(x= 'Flipper Length (mm)',
+       y = 'Probablity of outcome (Chinstrap)')
+```
+
+## Predictions for new values with predict()
+
+```{r}
+ex1 <- predict(ad_chin_blr1,
+               data.frame(sex = 'female', 
+                          body_mass_g = 3410,
+                          flipper_length_mm = 192),
+               type = 'response')
+
+# interpret result as : 40 % chance it's an Adelie? 
+
+new_df <- data.frame(
+  sex = c('male', 'female', 'female'),
+  body_mass_g = c(3298, 4100, 3600),
+  flipper_length_mm = c(212, 175, 180)
+)
+
+ex2 <- predict(ad_chin_blr1, new_df, type = 'response')
+  
+#interpret
+# 93 % it's a chinstrap 
+# 1.7 % chance it's chinstrap
+# 6 % chance its a chinstrap 
+```
+
+# Create a new binary logistic model 
+
+```{r}
+f2 <- species ~ bill_length_mm + body_mass_g
+
+ad_chin_blr2 <- glm(formula = f2, data = adelie_chinstrap, family = 'binomial')
+
+ad_chin_blr2
+summary(ad_chin_blr2)
+blr2_tidy <- broom::tidy(ad_chin_blr2)
+```
+
+```{r}
+ggplot(adelie_chinstrap, aes(x = bill_length_mm, y = body_mass_g)) +
+  geom_point(aes(color = species))
+```
+
+## Model Selection 
+
+```{r}
+AICcmodavg::aictab(list(ad_chin_blr1, ad_chin_blr2))
+AICcmodavg::bictab(list(ad_chin_blr1, ad_chin_blr2))
+
+#delta AIC --> difference of 200 --- Model2 is best (by far)
+#delta BIC --> difference of ~214 -- Model2 is best (by far, again)
+```
+
+10 fold cross validation 
+
+```{r}
+set.seed(123)
+
+#this number is arbitrary, can pick anything. But need to do this for reprodicibiltiy
+
+n_folds <- 10 
+fold_vec <- rep(1:n_folds, length.out = nrow(adelie_chinstrap))
+
+ad_chin_kfold <- adelie_chinstrap %>%
+  mutate(fold = sample(fold_vec, size = n(), replace = FALSE))
+
+
+```
+
+purrr:map()
+
+```{r}
+x_vec <- 1:10
+thing <- purrr::map(.x = x_vec, ### a sequence (a vector, list)
+                 .f = sqrt) ### a function 
+
+thing 
+
+## this is similar to a foreloop 
+
+my_funct <- function(x, y, z) {
+  return((x - y) ^ z)
+}
+
+thing2 <- purrr::map(.x = x_vec,
+                     .f = my_funct,
+                     y = 2, z = 3) #this is because y and z are not defined in x_vec, must define
+```
+
+```{r}
+predict_acc <- function(x, y) {
+  accurate <- ifelse(x == y, 1, 0)
+  
+  return(mean(accurate, na.rm = TRUE))
+}
+
+calc_fold <- function(i, fold_df, f) {
+  kfold_test <- fold_df %>% 
+    filter(fold == i)
+  kfold_train <- fold_df %>%
+    filter(fold != i)
+  
+  kfold_blr <- glm(f, data = kfold_train, family = 'binomial')
+  
+  kfold_pred <- kfold_test %>%
+    mutate(blr = predict(kfold_blr, kfold_test, type = 'response'),
+           pred = ifelse(blr > 0.50, 'Chinstrap', 'Adelie'))
+  
+  kfold_accuracy <- kfold_pred %>%
+    summarize(blr_acc = predict_acc(species, pred))
+  
+  return(kfold_accuracy) #without return function, it will just give the last command in the curly brackets 
+}
+
+#when you call calc_fold, i = fold we are working on, df we are working on, and formula 
+# take .x and assigns it first argument (which is i in this case)
+```
+
+```{r}
+results1_purrr_df <- purrr::map(.x = 1:n_folds,
+                                .f = calc_fold,
+                                fold_df = ad_chin_kfold,
+                                f = f1) %>%
+  bind_rows() %>%
+  mutate(mdl = "f1")
+
+results2_purrr_df <- purrr::map(.x = 1:n_folds,
+                                .f = calc_fold,
+                                fold_df = ad_chin_kfold,
+                                f = f2) %>%
+  bind_rows() %>%
+  mutate(mdl = "f2")
+
+results_purrr_df <- bind_rows(results1_purrr_df, results2_purrr_df) %>%
+  group_by(mdl) %>%
+  summarize(mean_acc= mean(blr_acc))
+```
+
+
+### Tidymodels verison 
+
+```{r}
+# glm is the default, but there are other options 
+
+# define our model type 
+
+blr_model <- logistic_reg() %>%
+  set_engine('glm')
+
+### basic regression 
+
+blr_tidyfit_f1 <- blr_model %>%
+  fit(f1, data = adelie_chinstrap)
+
+blr_tidyfit_f2 <- blr_model %>%
+  fit(f2, data = adelie_chinstrap)
+
+blr_tidyfit_f2
+
+blr_tidyfit_f1 %>%
+  tidy()
+
+blr_tidyfit_f2 %>%
+  glance()
+```
+
+## Tidy kfold cross validation 
+
+```{r}
+set.seed(345)
+
+tidy_folds <- vfold_cv(adelie_chinstrap, v = 10)
+
+#use a workflow to bundle a model and a formula 
+
+blr_tidy_wf1 <- workflow() %>%
+  add_model(blr_model) %>%
+  add_formula(f1)
+
+blr_tidy_cv_f1 <- blr_tidy_wf1 %>%
+  fit_resamples(tidy_folds) 
+
+blr_tidy_cv_f1 #looks crazy by itself, so... 
+
+collect_metrics(blr_tidy_cv_f1)
+
+blr_tidy_wf2 <- workflow() %>%
+  add_model(blr_model) %>%
+  add_formula(f2)
+
+blr_tidy_cv_f2 <- blr_tidy_wf2 %>%
+  fit_resamples(tidy_folds) 
+
+blr_tidy_cv_f2 #looks crazy by itself, so... 
+
+collect_metrics(blr_tidy_cv_f2)
+
+#model 2 still looks better
+```
+#Area under the curve 
+
+```{r}
+blr_f1_pred <- adelie_chinstrap %>%
+  mutate(predict(blr_tidyfit_f1, .)) %>% #period means, operate on the data set I already gave you 
+  mutate(predict(blr_tidyfit_f1, ., type = 'prob'))
+
+blr_f1_pred %>%
+  roc_curve(truth = species, .pred_Adelie ) %>% #tells which column is the right answer 
+  autoplot()
+
+# ideal = true positives = 100% , false positives = 0 % (nothing you predicted as adelie is a chinstrap)
+# can change your sensitivty (i.e. 40% or 50%, etc. ) --> you might want to avoid one type more than the other (think of COVID example )
+
+blr_f2_pred <- adelie_chinstrap %>%
+  mutate(predict(blr_tidyfit_f2, .)) %>% #period means, operate on the data set I already gave you 
+  mutate(predict(blr_tidyfit_f2, ., type = 'prob'))
+
+blr_f2_pred %>%
+  roc_curve(truth = species, .pred_Adelie ) %>% #tells which column is the right answer 
+  autoplot()
+
+# If your model is at the dotted line, it's no better than random
+# if your model looks like model 2, yay you did a good job
+# if your model is the opposite, something is fucked up 
+```
+
